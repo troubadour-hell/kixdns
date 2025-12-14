@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KixDNS 配置编辑器</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body { background-color: #f8f9fa; }
+        .editor-pane { height: 100vh; overflow-y: auto; border-right: 1px solid #dee2e6; }
+        .preview-pane { height: 100vh; overflow-y: auto; background-color: #212529; color: #f8f9fa; }
+        .card { margin-bottom: 1rem; }
+        .matcher-item, .action-item { background-color: #fff; border: 1px solid #dee2e6; padding: 0.5rem; margin-bottom: 0.5rem; border-radius: 0.25rem; }
+        .list-group-item { border-left: 4px solid transparent; }
+        .list-group-item.active-pipeline { border-left-color: #0d6efd; }
+        pre { margin: 0; }
+    </style>
+</head>
+<body>
+    <div id="app" class="container-fluid">
+        <div class="row">
+            <!-- Editor Pane -->
+            <div class="col-md-7 editor-pane p-4">
+                <h2 class="mb-4">KixDNS 配置编辑器</h2>
+                
+                <!-- Toolbar -->
+                <div class="mb-3 d-flex gap-2">
+                    <button class="btn btn-primary" @click="loadJson">从右侧加载 JSON</button>
+                    <button class="btn btn-success" @click="downloadJson">下载 JSON</button>
+                    <label class="btn btn-outline-secondary">
+                        导入文件 <input type="file" hidden @change="handleFileUpload">
+                    </label>
+                </div>
+
+                <ul class="nav nav-tabs mb-3">
+                    <li class="nav-item">
+                        <a class="nav-link" :class="{ active: currentTab === 'editor' }" href="#" @click.prevent="currentTab = 'editor'">配置编辑</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" :class="{ active: currentTab === 'flowchart' }" href="#" @click.prevent="renderFlowchart">流程图</a>
+                    </li>
+                </ul>
+
+                <div v-show="currentTab === 'flowchart'">
+                    <div class="card">
+                        <div class="card-body text-center overflow-auto">
+                            <div ref="mermaidRef"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div v-show="currentTab === 'editor'">
+                <!-- Global Settings -->
+                <div class="card">
+                    <div class="card-header bg-light fw-bold">全局设置 (Settings)</div>
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label">UDP 监听地址</label>
+                                <input type="text" class="form-control" v-model="config.settings.bind_udp">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">TCP 监听地址</label>
+                                <input type="text" class="form-control" v-model="config.settings.bind_tcp">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">默认上游</label>
+                                <input type="text" class="form-control" v-model="config.settings.default_upstream">
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label">最小 TTL</label>
+                                <input type="number" class="form-control" v-model.number="config.settings.min_ttl">
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label">上游超时 (ms)</label>
+                                <input type="number" class="form-control" v-model.number="config.settings.upstream_timeout_ms">
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label">响应跳转上限</label>
+                                <input type="number" class="form-control" v-model.number="config.settings.response_jump_limit">
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label">UDP 连接池大小</label>
+                                <input type="number" class="form-control" v-model.number="config.settings.udp_pool_size" placeholder="0=禁用">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Pipeline Selectors -->
+                <div class="card">
+                    <div class="card-header bg-light fw-bold d-flex justify-content-between align-items-center">
+                        <span>分流规则 (Pipeline Select)</span>
+                        <button class="btn btn-sm btn-outline-primary" @click="addPipelineSelect">+ 添加规则</button>
+                    </div>
+                    <div class="card-body">
+                        <div v-for="(sel, idx) in config.pipeline_select" :key="idx" class="matcher-item">
+                            <div class="d-flex gap-2 mb-2 align-items-center">
+                                <span class="badge bg-secondary">#{{ idx + 1 }}</span>
+                                <select class="form-select form-select-sm" style="width: auto;" v-model="sel.pipeline">
+                                    <option disabled value="">选择 Pipeline</option>
+                                    <option v-for="p in config.pipelines" :value="p.id">{{ p.id }}</option>
+                                </select>
+                                <button class="btn btn-sm btn-outline-danger ms-auto" @click="removePipelineSelect(idx)">删除</button>
+                            </div>
+                            <div class="ps-3 border-start">
+                                <div class="text-muted small mb-1">匹配条件 (Matchers):</div>
+                                <matcher-list :matchers="sel.matchers" :types="selectorMatcherTypes"></matcher-list>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Pipelines -->
+                <div class="card">
+                    <div class="card-header bg-light fw-bold d-flex justify-content-between align-items-center">
+                        <span>处理流程 (Pipelines)</span>
+                        <button class="btn btn-sm btn-outline-primary" @click="addPipeline">+ 添加 Pipeline</button>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="accordion" id="pipelineAccordion">
+                            <div v-for="(pipe, pIdx) in config.pipelines" :key="pIdx" class="accordion-item">
+                                <h2 class="accordion-header">
+                                    <button class="accordion-button" :class="{ collapsed: activePipelineIndex !== pIdx }" type="button" @click="togglePipeline(pIdx)">
+                                        <span class="fw-bold me-2">{{ pipe.id }}</span>
+                                        <span class="badge bg-secondary">{{ pipe.rules.length }} 规则</span>
+                                    </button>
+                                </h2>
+                                <div class="accordion-collapse collapse" :class="{ show: activePipelineIndex === pIdx }">
+                                    <div class="accordion-body bg-light">
+                                        <div class="mb-3">
+                                            <label class="form-label">Pipeline ID</label>
+                                            <div class="input-group">
+                                                <input type="text" class="form-control" v-model="pipe.id" @focus="cacheOldPipelineId(pipe)" @blur="onPipelineIdBlur(pipe)">
+                                                <button class="btn btn-outline-danger" @click="removePipeline(pIdx)">删除 Pipeline</button>
+                                            </div>
+                                        </div>
+                                        
+                                        <h6 class="fw-bold">规则列表 (Rules)</h6>
+                                        <div v-for="(rule, rIdx) in pipe.rules" :key="rIdx" class="card mb-3 shadow-sm">
+                                            <div class="card-header d-flex justify-content-between align-items-center py-1">
+                                                <input type="text" class="form-control form-control-sm w-50" v-model="rule.name" placeholder="规则名称">
+                                                <button class="btn btn-sm btn-close" @click="removeRule(pipe, rIdx)"></button>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="mb-2">
+                                                    <span class="badge bg-info text-dark">请求匹配 (Matchers)</span>
+                                                    <matcher-list :matchers="rule.matchers" :types="requestMatcherTypes"></matcher-list>
+                                                </div>
+                                                <div class="mb-2">
+                                                    <span class="badge bg-warning text-dark">执行动作 (Actions)</span>
+                                                    <action-list :actions="rule.actions" :pipelines="config.pipelines" :current-pipeline-id="pipe.id"></action-list>
+                                                </div>
+                                                <div v-if="ruleHasForwardAction(rule)">
+                                                    <span class="badge bg-success">响应匹配 (Response Matchers)</span>
+                                                    <matcher-list :matchers="rule.response_matchers" :types="responseMatcherTypes"></matcher-list>
+                                                    <div class="form-text small text-muted">仅在匹配 `forward` 动作时生效</div>
+                                                    <div class="mt-2">
+                                                        <span class="badge bg-primary">响应匹配成功动作</span>
+                                                        <action-list :actions="rule.response_actions_on_match" :pipelines="config.pipelines" :current-pipeline-id="pipe.id"></action-list>
+                                                    </div>
+                                                    <div class="mt-2">
+                                                        <span class="badge bg-danger">响应匹配失败动作</span>
+                                                        <action-list :actions="rule.response_actions_on_miss" :pipelines="config.pipelines" :current-pipeline-id="pipe.id"></action-list>
+                                                    </div>
+                                                    <div class="form-text small text-muted">收到上游响应后执行，成功/失败分支均可使用所有动作。</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <button class="btn btn-sm btn-outline-secondary w-100" @click="addRule(pipe)">+ 添加规则</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                </div> <!-- End of Editor Tab -->
+
+            </div>
+
+            <!-- Preview Pane -->
+            <div class="col-md-5 preview-pane p-4">
+                <h4 class="mb-3">JSON 预览 / 编辑</h4>
+                <textarea class="form-control font-monospace bg-dark text-light border-secondary" 
+                    style="height: calc(100vh - 160px); font-size: 12px;" 
+                    v-model="rawJson" 
+                    @input="manualJsonEdit = true"></textarea>
+            </div>
+        </div>
+    </div>
+
+    <!-- Component Templates -->
+    <script type="text/x-template" id="matcher-list-template">
+        <div>
+            <div v-for="(m, idx) in matchers" :key="idx" class="input-group input-group-sm mb-1">
+                <select v-if="withOperator" class="form-select" style="max-width: 120px;" v-model="m.operator">
+                    <option value="and">AND</option>
+                    <option value="or">OR</option>
+                    <option value="and_not">AND NOT</option>
+                    <option value="or_not">OR NOT</option>
+                    <option value="not">NOT</option>
+                </select>
+                <select class="form-select" style="max-width: 140px;" v-model="m.type" @change="resetMatcherFields(m)">
+                    <option v-for="(label, type) in types" :value="type">{{ label }}</option>
+                </select>
+                
+                <!-- Dynamic Inputs based on type -->
+                <input v-if="hasField(m.type, 'value')" type="text" class="form-control" v-model="m.value" placeholder="Value">
+                <input v-if="hasField(m.type, 'cidr')" type="text" class="form-control" v-model="m.cidr" placeholder="CIDR 或逗号分隔列表 (e.g. 127.0.0.0/8,0.0.0.0/8)">
+                <div v-if="hasField(m.type, 'expect')" class="input-group-text bg-white">
+                    <input type="checkbox" class="form-check-input mt-0" v-model="m.expect"> &nbsp;Expect
+                </div>
+
+                <button class="btn btn-outline-danger" @click="matchers.splice(idx, 1)">×</button>
+            </div>
+            <button class="btn btn-sm btn-link text-decoration-none p-0" @click="addMatcher">+ 添加条件</button>
+        </div>
+    </script>
+
+    <script type="text/x-template" id="action-list-template">
+        <div>
+            <div v-for="(a, idx) in actions" :key="idx" class="input-group input-group-sm mb-1">
+                <select class="form-select" style="max-width: 140px;" v-model="a.type" @change="resetActionFields(a)">
+                    <option value="log">Log</option>
+                    <option value="static_response">Static Response</option>
+                    <option value="static_ip_response">Static IP</option>
+                    <option value="jump_to_pipeline">Jump to Pipeline</option>
+                    <option value="allow">Allow (Pass)</option>
+                    <option value="deny">Deny (Drop)</option>
+                    <option value="forward">Forward</option>
+                    <option value="continue">Continue</option>
+                </select>
+
+                <!-- Log -->
+                <select v-if="a.type === 'log'" class="form-select" v-model="a.level">
+                    <option value="trace">Trace</option>
+                    <option value="debug">Debug</option>
+                    <option value="info">Info</option>
+                    <option value="warn">Warn</option>
+                    <option value="error">Error</option>
+                </select>
+
+                <!-- Static Response -->
+                <select v-if="a.type === 'static_response'" class="form-select" v-model="a.rcode">
+                    <option value="NOERROR">NOERROR</option>
+                    <option value="NXDOMAIN">NXDOMAIN</option>
+                    <option value="SERVFAIL">SERVFAIL</option>
+                    <option value="REFUSED">REFUSED</option>
+                </select>
+
+                <!-- Static IP -->
+                <input v-if="a.type === 'static_ip_response'" type="text" class="form-control" v-model="a.ip" placeholder="IP Address">
+
+                <!-- Jump -->
+                <select v-if="a.type === 'jump_to_pipeline'" class="form-select" v-model="a.pipeline">
+                    <option disabled value="">选择 Pipeline</option>
+                    <option v-for="p in pipelineOptions" :key="p" :value="p" :disabled="p === currentPipelineId">{{ p }}</option>
+                </select>
+
+                <!-- Forward -->
+                <template v-if="a.type === 'forward'">
+                    <input type="text" class="form-control" v-model="a.upstream" placeholder="Upstream (Optional)">
+                    <select class="form-select" style="max-width: 80px;" v-model="a.transport">
+                        <option :value="null">Auto</option>
+                        <option value="udp">UDP</option>
+                        <option value="tcp">TCP</option>
+                    </select>
+                </template>
+
+                <button class="btn btn-outline-danger" @click="actions.splice(idx, 1)">×</button>
+            </div>
+            <button class="btn btn-sm btn-link text-decoration-none p-0" @click="addAction">+ 添加动作</button>
+        </div>
+    </script>
+
+    <script>
+        const { createApp, ref, watch, reactive, nextTick, computed } = Vue;
+
+        // Field definitions for matchers to simplify template logic
+        const MATCHER_FIELDS = {
+            'listener_label': ['value'],
+            'client_ip': ['cidr'],
+            'domain_suffix': ['value'],
+            'domain_regex': ['value'],
+            'qclass': ['value'],
+            'edns_present': ['expect'],
+            'upstream_equals': ['value'],
+            'request_domain_suffix': ['value'],
+            'request_domain_regex': ['value'],
+            'response_type': ['value'],
+            'response_rcode': ['value'],
+            'response_qclass': ['value'],
+            'response_edns_present': ['expect'],
+            'response_upstream_ip': ['cidr'],
+            'response_answer_ip': ['cidr'],
+            'any': []
+        };
+
+        // Default logical operator for new matchers
+        const DEFAULT_MATCH_OPERATOR = 'and';
+
+        const MatcherList = {
+            template: '#matcher-list-template',
+            props: {
+                matchers: Array,
+                types: Object,
+                withOperator: {
+                    type: Boolean,
+                    default: true,
+                }
+            },
+            setup(props) {
+                const addMatcher = () => {
+                    const firstType = Object.keys(props.types)[0];
+                    props.matchers.push({ type: firstType, value: '', operator: DEFAULT_MATCH_OPERATOR });
+                };
+                const hasField = (type, field) => {
+                    return (MATCHER_FIELDS[type] || []).includes(field);
+                };
+                const resetMatcherFields = (m) => {
+                    // Keep type, clear others
+                    const type = m.type;
+                    for (const key in m) { if (key !== 'type' && key !== 'operator') delete m[key]; }
+                    if (hasField(type, 'value')) m.value = '';
+                    if (hasField(type, 'cidr')) m.cidr = '';
+                    if (hasField(type, 'expect')) m.expect = true;
+                    if (!m.operator) m.operator = DEFAULT_MATCH_OPERATOR;
+                };
+                return { addMatcher, hasField, resetMatcherFields };
+            }
+        };
+
+        const ActionList = {
+            template: '#action-list-template',
+            props: ['actions', 'pipelines', 'currentPipelineId'],
+            setup(props) {
+                const pipelineOptions = computed(() => (props.pipelines || []).map(p => p.id));
+                const addAction = () => {
+                    props.actions.push({ type: 'log', level: 'info' });
+                };
+                const resetActionFields = (a) => {
+                    const type = a.type;
+                    for (const key in a) { if (key !== 'type') delete a[key]; }
+                    if (type === 'log') a.level = 'info';
+                    if (type === 'static_response') a.rcode = 'NXDOMAIN';
+                    if (type === 'static_ip_response') a.ip = '127.0.0.1';
+                    if (type === 'jump_to_pipeline') a.pipeline = '';
+                    if (type === 'allow') { /* No fields */ }
+                    if (type === 'deny') { /* No fields */ }
+                    if (type === 'continue') { /* No fields */ }
+                    if (type === 'forward') { a.upstream = ''; a.transport = null; }
+                };
+                return { addAction, resetActionFields, pipelineOptions };
+            }
+        };
+
+        createApp({
+            components: { MatcherList, ActionList },
+            setup() {
+                const hash32 = (str) => {
+                    // FNV-1a 32-bit, output base36 (Mermaid-safe)
+                    let h = 0x811c9dc5;
+                    for (let i = 0; i < str.length; i++) {
+                        h ^= str.charCodeAt(i);
+                        h = Math.imul(h, 0x01000193);
+                    }
+                    return (h >>> 0).toString(36);
+                };
+
+                const makeSafeId = (str) => {
+                    const base = (str ?? 'node').toString();
+                    let slug = base.replace(/[^a-zA-Z0-9_]/g, '_');
+                    slug = slug.replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+                    if (!slug) slug = 'p';
+                    if (!/^[a-zA-Z]/.test(slug)) slug = 'p_' + slug;
+                    if (slug.length > 24) slug = slug.slice(0, 24);
+                    return `${slug}_${hash32(base)}`;
+                };
+
+                const config = ref({
+                    version: "1.0",
+                    settings: {
+                        min_ttl: 0,
+                        bind_udp: "0.0.0.0:5353",
+                        bind_tcp: "0.0.0.0:5353",
+                        default_upstream: "1.1.1.1:53",
+                        upstream_timeout_ms: 2000,
+                        response_jump_limit: 10,
+                        udp_pool_size: 0
+                    },
+                    pipeline_select: [],
+                    pipelines: []
+                });
+
+                const rawJson = ref('');
+                const manualJsonEdit = ref(false);
+
+                // Definitions
+                const selectorMatcherTypes = {
+                    'listener_label': 'Listener Label',
+                    'client_ip': 'Client IP',
+                    'domain_suffix': 'Domain Suffix',
+                    'domain_regex': 'Domain Regex',
+                    'any': 'Any',
+                    'qclass': 'QClass',
+                    'edns_present': 'EDNS Present'
+                };
+                const requestMatcherTypes = {
+                    'any': 'Any',
+                    'domain_suffix': 'Domain Suffix',
+                    'domain_regex': 'Domain Regex',
+                    'client_ip': 'Client IP',
+                    'qclass': 'QClass',
+                    'edns_present': 'EDNS Present'
+                };
+                const responseMatcherTypes = {
+                    'upstream_equals': 'Upstream Equals',
+                    'request_domain_suffix': 'Req Domain Suffix',
+                    'request_domain_regex': 'Req Domain Regex',
+                    'response_type': 'Response Type',
+                    'response_rcode': 'Response RCode',
+                    'response_qclass': 'Response QClass',
+                    'response_edns_present': 'Response EDNS',
+                    'response_upstream_ip': 'Upstream IP (CIDR)',
+                    'response_answer_ip': 'Answer IP (CIDR)'
+                };
+
+                const toCleanJsonString = (cfgObj) => JSON.stringify(cfgObj, (key, value) => {
+                    if (key && key.startsWith('_')) return undefined;
+                    return value;
+                }, 2);
+
+                // Sync Config -> JSON
+                watch(config, (newVal) => {
+                    if (!manualJsonEdit.value) {
+                        rawJson.value = toCleanJsonString(newVal);
+                    }
+                }, { deep: true });
+
+                watch(() => config.value.pipelines, (pipes) => {
+                    (pipes || []).forEach(pipe => {
+                        if (pipe._syncInProgress) {
+                            return;
+                        }
+                        if (!pipe._syncedId) {
+                            pipe._syncedId = pipe.id;
+                            pipe._oldId = pipe.id;
+                            return;
+                        }
+                        if (pipe._syncedId !== pipe.id) {
+                            const safeId = ensureUniquePipelineId(pipe.id, pipe);
+                            if (safeId !== pipe.id) {
+                                pipe.id = safeId;
+                            }
+                            replacePipelineRefs(pipe._syncedId, pipe.id);
+                            pipe._oldId = pipe.id;
+                            pipe._syncedId = pipe.id;
+                        }
+                    });
+                }, { deep: true });
+
+                // Sync JSON -> Config (Manual Load)
+                const loadJson = () => {
+                    try {
+                        const parsed = JSON.parse(rawJson.value);
+                        // attach _oldId/_syncedId for rename tracking
+                        (parsed.pipelines || []).forEach(p => {
+                            p._oldId = p.id;
+                            p._syncedId = p.id;
+                            (p.rules || []).forEach(r => normalizeRule(r));
+                        });
+                        (parsed.pipeline_select || []).forEach(sel => normalizePipelineSelect(sel));
+                        config.value = parsed;
+                        manualJsonEdit.value = false;
+                    } catch (e) {
+                        alert('JSON 解析失败: ' + e.message);
+                    }
+                };
+
+                const handleFileUpload = (event) => {
+                    const file = event.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        rawJson.value = e.target.result;
+                        loadJson();
+                    };
+                    reader.readAsText(file);
+                };
+
+                const downloadJson = () => {
+                    const blob = new Blob([rawJson.value], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'pipeline.json';
+                    a.click();
+                };
+
+                // Helper methods
+                const addPipelineSelect = () => {
+                    config.value.pipeline_select.push({ pipeline: '', matchers: [], matcher_operator: DEFAULT_MATCH_OPERATOR });
+                };
+                const removePipelineSelect = (idx) => {
+                    config.value.pipeline_select.splice(idx, 1);
+                };
+
+                const ensureUniquePipelineId = (base, self = null) => {
+                    const clean = base && base.trim() ? base.trim() : 'pipeline';
+                    let candidate = clean;
+                    let counter = 1;
+                    while (config.value.pipelines.some(p => p !== self && p.id === candidate)) {
+                        candidate = `${clean}_${counter++}`;
+                    }
+                    return candidate;
+                };
+
+                const generatePipelineId = () => {
+                    return ensureUniquePipelineId('pipeline');
+                };
+
+                const generateRuleName = (pipeline) => {
+                    const base = 'rule';
+                    let idx = 1;
+                    let candidate = `${base}_${idx}`;
+                    const existing = new Set(pipeline.rules.map(r => r.name));
+                    while (existing.has(candidate)) {
+                        idx += 1;
+                        candidate = `${base}_${idx}`;
+                    }
+                    return candidate;
+                };
+
+                const replacePipelineRefs = (oldId, newId) => {
+                    if (!oldId || oldId === newId) return;
+                    // selectors
+                    config.value.pipeline_select.forEach(sel => {
+                        if (sel.pipeline === oldId) sel.pipeline = newId;
+                    });
+                    // jump actions
+                    config.value.pipelines.forEach(pipe => {
+                        pipe.rules.forEach(rule => {
+                            rule.actions.forEach(a => {
+                                if (a.type === 'jump_to_pipeline' && a.pipeline === oldId) {
+                                    a.pipeline = newId;
+                                }
+                            });
+                            (rule.response_actions_on_match || []).forEach(a => {
+                                if (a.type === 'jump_to_pipeline' && a.pipeline === oldId) {
+                                    a.pipeline = newId;
+                                }
+                            });
+                            (rule.response_actions_on_miss || []).forEach(a => {
+                                if (a.type === 'jump_to_pipeline' && a.pipeline === oldId) {
+                                    a.pipeline = newId;
+                                }
+                            });
+                        });
+                    });
+                };
+
+                const normalizeMatcherOps = (items) => {
+                    (items || []).forEach(m => {
+                        if (!m.operator) m.operator = DEFAULT_MATCH_OPERATOR;
+                    });
+                };
+
+                const normalizeRule = (rule) => {
+                    rule.matchers = rule.matchers || [];
+                    rule.matcher_operator = rule.matcher_operator || DEFAULT_MATCH_OPERATOR;
+                    normalizeMatcherOps(rule.matchers);
+                    rule.actions = rule.actions || [];
+                    rule.response_matchers = rule.response_matchers || [];
+                    rule.response_matcher_operator = rule.response_matcher_operator || DEFAULT_MATCH_OPERATOR;
+                    normalizeMatcherOps(rule.response_matchers);
+                    rule.response_actions_on_match = rule.response_actions_on_match || [];
+                    rule.response_actions_on_miss = rule.response_actions_on_miss || [];
+                };
+
+                const normalizePipelineSelect = (sel) => {
+                    sel.matchers = sel.matchers || [];
+                    sel.matcher_operator = sel.matcher_operator || DEFAULT_MATCH_OPERATOR;
+                    normalizeMatcherOps(sel.matchers);
+                };
+
+                const cacheOldPipelineId = (pipe) => {
+                    pipe._oldId = pipe.id;
+                };
+
+                const markPipelineSync = (pipe) => {
+                    pipe._syncInProgress = true;
+                };
+
+                const clearPipelineSync = (pipe) => {
+                    pipe._syncInProgress = false;
+                    pipe._syncedId = pipe.id;
+                    pipe._oldId = pipe.id;
+                };
+
+                const onPipelineIdBlur = (pipe) => {
+                    const oldId = pipe._oldId || pipe.id;
+                    markPipelineSync(pipe);
+                    let newId = (pipe.id || '').trim();
+                    if (!newId) {
+                        alert('Pipeline ID 不能为空，将还原为原值');
+                        pipe.id = oldId;
+                        clearPipelineSync(pipe);
+                        return;
+                    }
+
+                    const uniqueId = ensureUniquePipelineId(newId, pipe);
+                    if (uniqueId !== newId) {
+                        alert(`Pipeline ID 已存在，已调整为 ${uniqueId}`);
+                    }
+
+                    pipe.id = uniqueId;
+                    if (oldId !== pipe.id) {
+                        replacePipelineRefs(oldId, pipe.id);
+                        alert(`已将 Pipeline ID 从 ${oldId} 更新为 ${pipe.id}，所有引用已同步`);
+                    }
+                    clearPipelineSync(pipe);
+                };
+
+                const addPipeline = () => {
+                    const newId = generatePipelineId();
+                    config.value.pipelines.push({ id: newId, rules: [], _oldId: newId });
+                };
+                const removePipeline = (idx) => {
+                    config.value.pipelines.splice(idx, 1);
+                };
+                const addRule = (pipeline) => {
+                    const name = generateRuleName(pipeline);
+                    const rule = {
+                        name,
+                        matchers: [],
+                        matcher_operator: DEFAULT_MATCH_OPERATOR,
+                        actions: [],
+                        response_matchers: [],
+                        response_matcher_operator: DEFAULT_MATCH_OPERATOR,
+                        response_actions_on_match: [],
+                        response_actions_on_miss: []
+                    };
+                    normalizeRule(rule);
+                    pipeline.rules.push(rule);
+                };
+                const removeRule = (pipeline, idx) => {
+                    pipeline.rules.splice(idx, 1);
+                };
+                const ruleHasForwardAction = (rule) => {
+                    return rule.actions.some(action => action.type === 'forward');
+                };
+
+                const activePipelineIndex = ref(0);
+                const togglePipeline = (idx) => {
+                    activePipelineIndex.value = activePipelineIndex.value === idx ? -1 : idx;
+                };
+
+                const currentTab = ref('editor');
+                const mermaidRef = ref(null);
+
+                const summarizeMatchers = (ms) => {
+                    if (!ms || ms.length === 0) return 'ANY';
+                    return ms
+                        .map((m, idx) => {
+                            const op = idx === 0 ? '' : m.operator?.toUpperCase() || 'AND';
+                            const type = m.type || m.matcher?.type || m.matcher?.matcher?.type || 'matcher';
+                            const val = m.value || m.cidr || (m.expect === true || m.expect === false ? `expect=${m.expect}` : '');
+                            const body = val ? `${type}:${val}` : type;
+                            return op ? `${op} ${body}` : body;
+                        })
+                        .join(' ');
+                };
+
+                const renderFlowchart = async () => {
+                    currentTab.value = 'flowchart';
+                    await nextTick();
+                    
+                    const idMap = {};
+                    const usedSafeIds = new Set();
+                    (config.value.pipelines || []).forEach(p => {
+                        let safe = makeSafeId(p.id);
+                        let counter = 1;
+                        while (usedSafeIds.has(safe)) {
+                            safe = `${makeSafeId(p.id)}_${counter++}`;
+                        }
+                        usedSafeIds.add(safe);
+                        idMap[p.id] = safe;
+                    });
+
+                    // IMPORTANT: Cross-subgraph edges must be emitted after all subgraphs declare their nodes.
+                    // Otherwise Mermaid may auto-create the target node inside the current subgraph.
+                    const postEdges = [];
+
+                    let graph = "graph TD\n";
+                    graph += "  Start((Start)) --> Select{Selector}\n";
+
+                    // Pipelines and rules (ordered), wrapped inside subgraphs for better grouping
+                    config.value.pipelines.forEach(pipe => {
+                        const pid = pipe.id;
+                        const pidSafe = idMap[pid];
+                        const entryId = `${pidSafe}_entry`;
+
+                        graph += `  subgraph ${pidSafe}_sg["${pid}"]\n`;
+                        graph += `    direction TB\n`;
+                        graph += `    ${entryId}([入口])\n`;
+
+                        const rules = pipe.rules || [];
+                        rules.forEach((rule, rIdx) => {
+                            const rid = `${pidSafe}_r${rIdx}`;
+                            const label = rule.name ? `${rIdx + 1}. ${rule.name}` : `Rule ${rIdx + 1}`;
+
+                            graph += `    ${rid}[[${label}]]\n`;
+
+                            // Jump edges from this rule's actions
+                            (rule.actions || []).forEach(action => {
+                                if (action.type === 'jump_to_pipeline' && action.pipeline) {
+                                    const targetSafe = idMap[action.pipeline] || makeSafeId(action.pipeline);
+                                    const targetEntry = `${targetSafe}_entry`;
+                                    postEdges.push(`  ${rid} -. "jump" .-> ${targetEntry}\n`);
+                                }
+                            });
+                            (rule.response_actions_on_match || []).forEach(action => {
+                                if (action.type === 'jump_to_pipeline' && action.pipeline) {
+                                    const targetSafe = idMap[action.pipeline] || makeSafeId(action.pipeline);
+                                    const targetEntry = `${targetSafe}_entry`;
+                                    postEdges.push(`  ${rid} -. "resp match jump" .-> ${targetEntry}\n`);
+                                }
+                            });
+                            (rule.response_actions_on_miss || []).forEach(action => {
+                                if (action.type === 'jump_to_pipeline' && action.pipeline) {
+                                    const targetSafe = idMap[action.pipeline] || makeSafeId(action.pipeline);
+                                    const targetEntry = `${targetSafe}_entry`;
+                                    postEdges.push(`  ${rid} -. "resp miss jump" .-> ${targetEntry}\n`);
+                                }
+                            });
+
+                            // Sequential edges inside pipeline, labeled with request matchers
+                            const matcherLabel = summarizeMatchers(rule.matchers);
+                            if (rIdx === 0) {
+                                graph += `    ${entryId} -->|"${matcherLabel}"| ${rid}\n`;
+                            } else {
+                                const prevId = `${pidSafe}_r${rIdx - 1}`;
+                                graph += `    ${prevId} -->|"${matcherLabel}"| ${rid}\n`;
+                            }
+                        });
+
+                        graph += `  end\n`;
+                    });
+
+                    // Pipeline Selectors with labeled edges (after subgraphs so entry nodes exist)
+                    config.value.pipeline_select.forEach((sel, idx) => {
+                        if (sel.pipeline) {
+                            const label = summarizeMatchers(sel.matchers);
+                            const targetSafe = idMap[sel.pipeline] || makeSafeId(sel.pipeline);
+                            const entryId = `${targetSafe}_entry`;
+                            graph += `  Select -- "#${idx+1}: ${label}" --> ${entryId}\n`;
+                        }
+                    });
+
+                    // Emit cross-pipeline edges last to ensure targets are declared in their own subgraphs.
+                    postEdges.forEach(e => {
+                        graph += e;
+                    });
+
+                    if (mermaidRef.value) {
+                        mermaidRef.value.innerHTML = '';
+                        try {
+                            const { svg } = await mermaid.render('graphDiv' + Date.now(), graph);
+                            mermaidRef.value.innerHTML = svg;
+                        } catch (e) {
+                            mermaidRef.value.innerHTML = '<div class="text-danger">Error rendering graph: ' + e.message + '</div>';
+                            console.error(e);
+                        }
+                    }
+                };
+
+                mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' });
+
+                // Initialize with default JSON
+                rawJson.value = toCleanJsonString(config.value);
+
+                return {
+                    config, rawJson, manualJsonEdit,
+                    selectorMatcherTypes, requestMatcherTypes, responseMatcherTypes,
+                    loadJson, handleFileUpload, downloadJson,
+                    addPipelineSelect, removePipelineSelect,
+                    addPipeline, removePipeline,
+                    addRule, removeRule,
+                    ruleHasForwardAction,
+                    activePipelineIndex, togglePipeline,
+                    currentTab, mermaidRef, renderFlowchart
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
